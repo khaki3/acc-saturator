@@ -1,0 +1,259 @@
+diff --git a/352.ep/src/ep.c b/352.ep/src/ep.c
+index bb1766c..4b84dea 100644
+--- a/352.ep/src/ep.c
++++ b/352.ep/src/ep.c
+@@ -82,7 +82,11 @@
+ #define t23 8.388608e+06
+ #define t46 t23 * t23
+ 
++#if defined(__GNUC__) && !defined(__clang__) && !defined(__NVCOMPILER)
++#pragma acc routine seq
++#else
+ INLINE
++#endif
+ double randlc_ep( double *x, double a )
+ {
+   //--------------------------------------------------------------------
+diff --git a/370.bt/src/rhs.c b/370.bt/src/rhs.c
+index 3dc667a..0054ecb 100644
+--- a/370.bt/src/rhs.c
++++ b/370.bt/src/rhs.c
+@@ -314,9 +314,9 @@ void compute_rhs()
+     //---------------------------------------------------------------------
+     // add fourth order eta-direction dissipation         
+     //---------------------------------------------------------------------
+-    j = 1;
+ 	#pragma acc loop
+     for (i = 1; i <= gp02; i++) {
++      j = 1;
+         rhs[k][j][i][0] = rhs[k][j][i][0]- dssp * 
+           ( 5.0*u[k][j][i][0] - 4.0*u[k][j+1][i][0] +
+             u[k][j+2][i][0]);
+@@ -334,9 +334,9 @@ void compute_rhs()
+             u[k][j+2][i][4]);
+     }
+ 
+-    j = 2;
+ 	#pragma acc loop 
+     for (i = 1; i <= gp02; i++) {
++      j = 2;
+         rhs[k][j][i][0] = rhs[k][j][i][0] - dssp * 
+           (-4.0*u[k][j-1][i][0] + 6.0*u[k][j][i][0] -
+            4.0*u[k][j+1][i][0] + u[k][j+2][i][0]);
+@@ -380,9 +380,9 @@ void compute_rhs()
+       }
+     }
+ 
+-    j = gp1-3;
+ 	#pragma acc loop
+     for (i = 1; i <= gp02; i++) {
++      j = gp1-3;
+         rhs[k][j][i][0] = rhs[k][j][i][0] - dssp *
+           ( u[k][j-2][i][0] - 4.0*u[k][j-1][i][0] + 
+             6.0*u[k][j][i][0] - 4.0*u[k][j+1][i][0] );
+@@ -400,9 +400,9 @@ void compute_rhs()
+             6.0*u[k][j][i][4] - 4.0*u[k][j+1][i][4] );
+     }
+ 
+-    j = gp12;
+ 	#pragma acc loop
+     for (i = 1; i <= gp02; i++) {
++      j = gp12;
+         rhs[k][j][i][0] = rhs[k][j][i][0] - dssp *
+           ( u[k][j-2][i][0] - 4.*u[k][j-1][i][0] +
+             5.*u[k][j][i][0] );
+diff --git a/504.polbm/src/lbm.c b/504.polbm/src/lbm.c
+index d10aa31..09b59f8 100644
+--- a/504.polbm/src/lbm.c
++++ b/504.polbm/src/lbm.c
+@@ -17,7 +17,11 @@
+ extern size_t gridSize;        
+ extern size_t marginSize;
+ 
++#if defined(__GNUC__) && !defined(__clang__) && !defined(__NVCOMPILER)
++size_t GRID_SIZE = SIZE_Z*SIZE_Y*SIZE_X*N_CELL_ENTRIES;
++#else
+ #define GRID_SIZE (SIZE_Z*SIZE_Y*SIZE_X*N_CELL_ENTRIES)
++#endif
+ 
+ /*############################################################################*/
+ 
+diff --git a/554.pcg/src/cg.c b/554.pcg/src/cg.c
+index 75d1f2a..8c09754 100644
+--- a/554.pcg/src/cg.c
++++ b/554.pcg/src/cg.c
+@@ -46,34 +46,46 @@
+ 
+ //---------------------------------------------------------------------
+ /* common / main_int_mem / */
++#if (defined(__GNUC__) || defined(__NVCOMPILER)) && !defined(__clang__)
+ #pragma omp declare target
++#endif
+ static int colidx[NZ];
+ static int rowstr[NA+1];
++#if (defined(__GNUC__) || defined(__NVCOMPILER)) && !defined(__clang__)
+ #pragma omp end declare target
++#endif
+ static int iv[NA];
+ static int arow[NA];
+ static int acol[NAZ];
+ 
+ /* common / main_flt_mem / */
+ static double aelt[NAZ];
++#if (defined(__GNUC__) || defined(__NVCOMPILER)) && !defined(__clang__)
+ #pragma omp declare target
++#endif
+ static double a[NZ];
+ static double x[NA+2];
+ static double z[NA+2];
+ static double p[NA+2];
+ static double q[NA+2];
+ static double r[NA+2];
++#if (defined(__GNUC__) || defined(__NVCOMPILER)) && !defined(__clang__)
+ #pragma omp end declare target
++#endif
+ 
+ /* common / partit_size / */
+ static int nzz;
++#if (defined(__GNUC__) || defined(__NVCOMPILER)) && !defined(__clang__)
+ #pragma omp declare target
++#endif
+ static int naa;
+ static int firstrow;
+ static int lastrow;
+ static int firstcol;
+ static int lastcol;
++#if (defined(__GNUC__) || defined(__NVCOMPILER)) && !defined(__clang__)
+ #pragma omp end declare target
++#endif
+ 
+ /* common /urando/ */
+ static double amult;
+@@ -469,7 +481,13 @@ static void conj_grad(int colidx[],
+ {
+   double sum;
+   //pcopyin(colidx[0:NZ],rowstr[0:NA+1],x[0:NA+2],a[0:NZ]), pcopyout(z[0:NA+2],p[0:NA+2],q[0:NA+2],r[0:NA+2])
++#if defined(__GNUC__) &&  !defined(__NVCOMPILER) && !defined(__clang__)
++  #pragma omp target data map(alloc:colidx[0:NZ2],rowstr[0:NA2+1],x[0:NA2+2],a[0:NZ2],z[0:NA2+2],p[0:NA2+2],q[0:NA2+2],r[0:NA2+2])
++#elif !defined(__NVCOMPILER)
++  #pragma omp target data map(colidx[0:NZ],rowstr[0:NA+1],x[0:NA+2],a[0:NZ],z[0:NA+2],p[0:NA+2],q[0:NA+2],r[0:NA+2])
++#else
+   #pragma omp target data map(alloc:colidx[0:NZ],rowstr[0:NA+1],x[0:NA+2],a[0:NZ],z[0:NA+2],p[0:NA+2],q[0:NA+2],r[0:NA+2])
++#endif
+   {
+     int j, k,tmp1,tmp2,tmp3;
+     int end;
+diff --git a/554.pcg/src/globals.h b/554.pcg/src/globals.h
+index 842a623..e4bc57f 100644
+--- a/554.pcg/src/globals.h
++++ b/554.pcg/src/globals.h
+@@ -118,6 +118,8 @@
+ 
+ #define NZ    (NA*(NONZER+1)*(NONZER+1))
+ #define NAZ   (NA*(NONZER+1))
++size_t NZ2=NZ;
++size_t NAZ2=NAZ;
+ 
+ #define T_init        0
+ #define T_bench       1
+diff --git a/554.pcg/src/npbparams.h b/554.pcg/src/npbparams.h
+index 709e712..0e3c09b 100644
+--- a/554.pcg/src/npbparams.h
++++ b/554.pcg/src/npbparams.h
+@@ -20,3 +20,5 @@
+ #define CS5 ""
+ #define CS6 ""
+ #define CS7 "randdp"
++
++size_t NA2=NA;
+diff --git a/557.pcsp/src/adi.c b/557.pcsp/src/adi.c
+index 02e283f..c3af5f5 100644
+--- a/557.pcsp/src/adi.c
++++ b/557.pcsp/src/adi.c
+@@ -248,7 +248,7 @@ void x_solve()
+       for (i = 0; i <= gp01; i++) {
+         ru1 = c3c4*rho_i[k][j][i];
+         //cv[i] = us[k][j][i];
+-        rhonX[k][j][i] = max(max(dx2+con43*ru1,dx5+c1c5*ru1), max(dxmax+ru1,dx1));
++        rhonX[k][j][i] = max2(max2(dx2+con43*ru1,dx5+c1c5*ru1), max2(dxmax+ru1,dx1));
+       }
+     #pragma omp simd
+     for (i = 1; i <= nx2; i++) {
+@@ -647,7 +647,7 @@ void y_solve()
+       for (j = 0; j <= gp1-1; j++) {
+         ru1 = c3c4*rho_i[k][j][i];
+    //     cv[j] = vs[k][j][i];
+-        rhoqY[k][j][i] = max(max(dy3+con43*ru1, dy5+c1c5*ru1), max(dymax+ru1, dy1));
++        rhoqY[k][j][i] = max2(max2(dy3+con43*ru1, dy5+c1c5*ru1), max2(dymax+ru1, dy1));
+       }
+       #pragma omp simd
+       for (j = 1; j <= gp1-2; j++) {
+@@ -1017,7 +1017,7 @@ void z_solve()
+       for (k = 0; k <= nz2+1; k++) {
+         ru1 = c3c4*rho_i[k][j][i];
+      //   cv[k] = ws[k][j][i];
+-        rhosZ[j][i][k] = max(max(dz4+con43*ru1, dz5+c1c5*ru1), max(dzmax+ru1, dz1));
++        rhosZ[j][i][k] = max2(max2(dz4+con43*ru1, dz5+c1c5*ru1), max2(dzmax+ru1, dz1));
+       }
+     }
+   }
+diff --git a/557.pcsp/src/header.h b/557.pcsp/src/header.h
+index 73e3a9b..6360895 100644
+--- a/557.pcsp/src/header.h
++++ b/557.pcsp/src/header.h
+@@ -63,7 +63,10 @@ extern double tx1, tx3, ty1, ty3, tz1, tz3,
+               c3, c4, c5, c4dssp, c5dssp, dtdssp,
+               c3c4tx3, c3c4ty3, c3c4tz3, con16;
+ 
++#if defined(__GNUC__) && !defined(__clang__) && !defined(__NVCOMPILER)
++#else
+ #pragma omp declare target
++#endif
+ extern double tx2, ty2, tz2,
+               dx1, dx2, dx3, dx4, dx5, dy1, dy2, dy3, dy4,
+               dy5, dz1, dz2, dz3, dz4, dz5, dssp, dt,
+@@ -78,7 +81,10 @@ extern double tx2, ty2, tz2,
+               dttx2, dtty1, dtty2, dttz1, dttz2, c2dttx1,
+               c2dtty1, c2dttz1, comz1, comz4, comz5, comz6,
+               c2iv, con43;
++#if defined(__GNUC__) && !defined(__clang__) && !defined(__NVCOMPILER)
++#else
+ #pragma omp end declare target
++#endif
+ 
+ #define IMAX    PROBLEM_SIZE
+ #define JMAX    PROBLEM_SIZE
+diff --git a/557.pcsp/src/set_constants.c b/557.pcsp/src/set_constants.c
+index 418338f..89301cb 100644
+--- a/557.pcsp/src/set_constants.c
++++ b/557.pcsp/src/set_constants.c
+@@ -155,11 +155,11 @@ void set_constants()
+   dz4 = 1.0;
+   dz5 = 1.0;
+ 
+-  dxmax = max(dx3, dx4);
+-  dymax = max(dy2, dy4);
+-  dzmax = max(dz2, dz3);
++  dxmax = max2(dx3, dx4);
++  dymax = max2(dy2, dy4);
++  dzmax = max2(dz2, dz3);
+ 
+-  dssp = 0.25 * max(dx1, max(dy1, dz1));
++  dssp = 0.25 * max2(dx1, max2(dy1, dz1));
+ 
+   c4dssp = 4.0 * dssp;
+   c5dssp = 5.0 * dssp;
+diff --git a/557.pcsp/src/type.h b/557.pcsp/src/type.h
+index 4892bc3..04d4cda 100644
+--- a/557.pcsp/src/type.h
++++ b/557.pcsp/src/type.h
+@@ -8,7 +8,7 @@ typedef struct {
+ } dcomplex;
+ 
+ 
+-#define min(x,y)    ((x) < (y) ? (x) : (y))
+-#define max(x,y)    ((x) > (y) ? (x) : (y))
++#define min2(x,y)    ((x) < (y) ? (x) : (y))
++#define max2(x,y)    ((x) > (y) ? (x) : (y))
+ 
+ #endif //__TYPE_H__

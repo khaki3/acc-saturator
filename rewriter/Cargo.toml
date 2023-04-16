@@ -1,0 +1,8 @@
+[package]
+name = "rewriter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+egg = { version = "=0.9.1", features = ["lp"] }
+symbolic_expressions = "5.0.3"
