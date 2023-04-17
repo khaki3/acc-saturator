@@ -1,0 +1,102 @@
+
+NVHPC=nvfortran
+NVHPC_OPT=-DSPEC=1 -r8 -O3 -gpu=cc80,ptxinfo,fastmath -Minfo=accel -Minfo=mp
+NVHPC_ACC_OPT=-acc=gpu $(NVHPC_OPT)
+NVHPC_OMP_OPT=-mp=gpu $(NVHPC_OPT)
+
+GCC=gfortran
+GCC_OPT=-ffree-line-length-none -fdefault-real-8 -DSPEC=1 -DSPEC_NO_INLINE=1 -DSPEC_NEED_EXPLICIT_SIZE=1 -O3 -lm -mcmodel=large -foffload=nvptx-none -foffload=-lm -foffload=-latomic -foffload=-lgfortran -ffast-math
+GCC_ACC_OPT=-fopenacc $(GCC_OPT)
+GCC_OMP_OPT=-fopenmp $(GCC_OPT)
+
+ACCSAT=export ACCSAT_DEBUG=1; /work/acc-saturator-fortran/accsat
+
+NVPROF=nsys nvprof
+
+ACCEXEC_NVHPC=$(NVPROF) ./nvhpc $$OPT 2>&1 | tee -a nvhpc.log; \
+	$(NVPROF) ./nvhpc $$OPT 2>&1 | tee -a nvhpc.log; \
+	$(NVPROF) ./nvhpc $$OPT 2>&1 | tee -a nvhpc.log; \
+	$(NVPROF) ./nvhpc-sat $$OPT 2>&1 | tee -a nvhpc-sat.log; \
+	$(NVPROF) ./nvhpc-sat $$OPT 2>&1 | tee -a nvhpc-sat.log; \
+	$(NVPROF) ./nvhpc-sat $$OPT 2>&1 | tee -a nvhpc-sat.log
+
+ACCEXEC_GCC=LD_LIBRARY_PATH=/usr/local/lib64 $(NVPROF) ./gcc $$OPT 2>&1 | tee -a gcc.log; \
+	LD_LIBRARY_PATH=/usr/local/lib64 $(NVPROF) ./gcc $$OPT 2>&1 | tee -a gcc.log; \
+	LD_LIBRARY_PATH=/usr/local/lib64 $(NVPROF) ./gcc $$OPT 2>&1 | tee -a gcc.log; \
+	LD_LIBRARY_PATH=/usr/local/lib64 $(NVPROF) ./gcc-sat $$OPT 2>&1 | tee -a gcc-sat.log; \
+	LD_LIBRARY_PATH=/usr/local/lib64 $(NVPROF) ./gcc-sat $$OPT 2>&1 | tee -a gcc-sat.log; \
+	LD_LIBRARY_PATH=/usr/local/lib64 $(NVPROF) ./gcc-sat $$OPT 2>&1 | tee -a gcc-sat.log
+
+ACCEXEC=$(ACCEXEC_NVHPC); $(ACCEXEC_GCC)
+
+OMPEXEC=$(ACCEXEC)
+
+COMPINIT=rm -f *.log nvhpc nvhpc-sat gcc gcc-sat clang clang-sat *.sqlite *-rep
+
+ACCCOMP=$(COMPINIT); \
+    rm -f *.o; \
+    [ ! -z "$$(ls | grep \\.c$$)" ] && nvc -c *.c; \
+    for i in `cat dep-order`; do $(NVHPC) $(NVHPC_ACC_OPT) $$COMPOPT -c $$i; done; \
+    $(NVHPC) $(NVHPC_ACC_OPT) $$COMPOPT -o nvhpc *.o; \
+    rm -f *.o; \
+    [ ! -z "$$(ls | grep \\.c$$)" ] && nvc -c *.c; \
+    for i in `cat dep-order`; do $(ACCSAT) $(NVHPC) $(NVHPC_ACC_OPT) $$COMPOPT -c $$i; done; \
+    $(NVHPC) $(NVHPC_ACC_OPT) $$COMPOPT -o nvhpc-sat *.o; \
+    rm -f *.o; \
+    [ ! -z "$$(ls | grep \\.c$$)" ] && gcc -c *.c; \
+    for i in `cat dep-order`; do $(GCC) $(GCC_ACC_OPT) $$COMPOPT -c $$i; done; \
+    $(GCC) $(GCC_ACC_OPT) $$COMPOPT -o gcc *.o; \
+    rm -f *.o; \
+    [ ! -z "$$(ls | grep \\.c$$)" ] && gcc -c *.c; \
+    for i in `cat dep-order`; do $(ACCSAT) $(GCC) $(GCC_ACC_OPT) $$COMPOPT -c $$i; done; \
+    $(GCC) $(GCC_ACC_OPT) $$COMPOPT -o gcc-sat *.o
+
+OMPCOMP=$(COMPINIT); \
+    rm -f *.o; \
+    [ ! -z "$$(ls | grep \\.c$$)" ] && nvc -c *.c; \
+    for i in `cat dep-order`; do $(NVHPC) $(NVHPC_OMP_OPT) $$COMPOPT -c $$i; done; \
+    $(NVHPC) $(NVHPC_OMP_OPT) $$COMPOPT -o nvhpc *.o; \
+    rm -f *.o; \
+    [ ! -z "$$(ls | grep \\.c$$)" ] && nvc -c *.c; \
+    for i in `cat dep-order`; do $(ACCSAT) $(NVHPC) $(NVHPC_OMP_OPT) $$COMPOPT -c $$i; done; \
+    $(NVHPC) $(NVHPC_OMP_OPT) $$COMPOPT -o nvhpc-sat *.o; \
+    rm -f *.o; \
+    [ ! -z "$$(ls | grep \\.c$$)" ] && gcc -c *.c; \
+    for i in `cat dep-order`; do $(GCC) $(GCC_OMP_OPT) $$COMPOPT -c $$i; done; \
+    $(GCC) $(GCC_OMP_OPT) $$COMPOPT -o gcc *.o; \
+    rm -f *.o; \
+    [ ! -z "$$(ls | grep \\.c$$)" ] && gcc -c *.c; \
+    for i in `cat dep-order`; do $(ACCSAT) $(GCC) $(GCC_OMP_OPT) $$COMPOPT -c $$i; done; \
+    $(GCC) $(GCC_OMP_OPT) $$COMPOPT -o gcc-sat *.o
+
+all: 353
+
+351:
+	cd $@.*/src; \
+	rm -f ENVPAR PARIN runfile_atmos; \
+	ln -s ../data/ref/input/ENVPAR ../data/ref/input/PARIN ../data/ref/input/runfile_atmos .; \
+	export COMPOPT="-D__nopointer -DSPEC_OPENACC -D__lc"; \
+	$(ACCCOMP); $(ACCEXEC);
+	rm -f ENVPAR PARIN runfile_atmos
+
+551:
+	cd $@.*/src; \
+	rm -f ENVPAR PARIN runfile_atmos; \
+	ln -s ../data/ref/input/ENVPAR ../data/ref/input/PARIN ../data/ref/input/runfile_atmos .; \
+	export COMPOPT="-D__nopointer -DSPEC_OPENACC -D__lc"; \
+	$(OMPCOMP); $(OMPEXEC);
+	rm -f ENVPAR PARIN runfile_atmos
+
+353:
+	cd $@.*/src; \
+	rm -f clover.in; ln -s ../data/ref/input/clover.in .; \
+    export COMPOPT=""; \
+	$(ACCCOMP); $(ACCEXEC); \
+	rm -f clover.in clover.in.tmp clover.out
+
+553:
+	cd $@.*/src; \
+	rm -f clover.in; ln -s ../data/ref/input/clover.in .; \
+    export COMPOPT=""; \
+	$(OMPCOMP); $(OMPEXEC); \
+	rm -f clover.in clover.in.tmp clover.out

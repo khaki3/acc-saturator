@@ -9,9 +9,64 @@
 (provide (all-defined-out))
 
 (define DEBUG_MODE (getenv "ACCSAT_DEBUG"))
+(define type-reduct #f)
+(define new-type-table '())
 
 (define (sat sxml)
-  ((compose (update 'OMPPragma omp-updater)
+  (set! type-reduct (make-type-reduction-fn sxml))
+  ((compose
+    (update 'FfunctionDefinition sat-top)
+    (update 'typeTable update-type-table))
+   sxml))
+
+(define (update-type-table tb)
+  (define content (sxml:content tb))
+  (sxml:change-content tb (append content new-type-table)))
+
+(define (make-type-reduction-fn sxml)
+  (define mapping
+    (map
+     (lambda (bt)
+       (define type (sxml:attr bt 'type))
+       (define ref (sxml:attr bt 'ref))
+       (if (not (member ref '("Fcomplex" "Freal" "Fint")))
+           (cons type ref)
+
+           (let ()
+             (define new-type (~a type "__noptr"))
+             (define new-bt
+               (sxml:change-attrlist bt `((type ,new-type) (ref ,ref))))
+             (set! new-type-table (cons new-bt new-type-table))
+             (cons type new-type))))
+     ((sxpath "//FbasicType") sxml)))
+  (set! new-type-table (reverse new-type-table))
+  (lambda (type)
+    (let loop ([t type])
+      (define ref (assoc-ref mapping t))
+      (if ref (loop ref) t))))
+
+(define (sat-top sxml)
+  (define (i? x)
+    (define name ((if-car-sxpath "name/text()") x))
+    (string-prefix? "t__i" name))
+  (define tmp (%sat sxml))
+  (define new-sym (filter i? ((sxpath "//blockStatement/symbols/id") tmp)))
+  (define new-dec (filter i? ((sxpath "//blockStatement/declarations/varDecl") tmp)))
+  ((compose
+    remove-block
+    (update 'symbols
+            (lambda (n)
+              (define content (sxml:content n))
+              (sxml:change-content n (append content new-sym))))
+    (update 'declarations
+            (lambda (n)
+              (define content (sxml:content n))
+              (sxml:change-content n (append content new-dec))))
+    (update 'FfunctionDefinition sat-top))
+   tmp))
+
+(define (%sat sxml)
+  ((compose (update 'body omp-updater)
             (update 'ACCPragma acc-updater)) sxml))
 
 (define (update symbol proc)
@@ -39,31 +94,59 @@
       [(list _ (or "KERNELS" "KERNELS_LOOP"))
        kernels-updater]
 
-      [else sat]))
+      [else %sat]))
 
   (fn node))
 
+(define (remove-block node)
+  (define (proc node)
+    `(FifStatement
+      (condition (FlogicalConstant ".TRUE."))
+      (then ,(remove-block ((car-sxpath "body") node)))))
+  ((update 'blockStatement proc) node))
+
 (define (parallel-updater node)
-  (define start (current-inexact-milliseconds))
-  (define ret ((update 'forStatement for-updater) node))
-  (define end (current-inexact-milliseconds))
-  (when DEBUG_MODE
-    (eprintf "[ACCSAT] Time: ~a \n" (/ (- end start) 1000)))
-  ret)
+  ((update 'FdoStatement for-updater) node))
+
+(define kernel-count 0)
+
+(define (for-updater node)
+  (set! kernel-count (+ kernel-count 1))
+  (define tmp (%for-updater node))
+  ((compose
+    (update 'name (curryr rewrite-tmpvar kernel-count))
+    (update 'Var (curryr rewrite-tmpvar kernel-count))) tmp))
+
+(define (rewrite-tmpvar node count)
+  (define t (sxml:text node))
+  (if (tmpvar? t) `(,(sxml:name node) ,(~a "t__i" count t)) node))
 
 (define (kernels-updater node)
   (parallel-updater node))
 
 (define (omp-updater node)
-  (define dirname ((if-car-sxpath "string") node))
+  (let loop ([content (sxml:content node)] [kernel #f] [mod '()])
+    (cond [(null? content)
+           (define vars
+             (filter
+              (curry string-prefix? "t__i")
+              ((sxpath "//blockStatement/symbols/id/name/text()") (cons '_head mod))))
+           ((compose
+             (update 'FpragmaStatement (curryr attach-private vars))
+             (update 'body omp-updater))
+            (sxml:change-content node (reverse mod)))]
 
-  (define fn
-    (match dirname
-      [(list _ (or (regexp #rx"TARGET_TEAMS") (regexp #rx"TEAMS"))) parallel-updater]
+          [(and (eq? 'FdoStatement (sxml:name (car content))) kernel)
+           (loop (cdr content) #f
+                 (cons (cadr (parallel-updater (list '_head (car content)))) mod))]
 
-      [else sat]))
+          [(and (eq? 'FpragmaStatement (sxml:name (car content)))
+                (regexp-match #rx"(?i:teams)" (sxml:text (car content))))
+           (loop (cdr content) #t (cons (car content) mod))]
 
-  (fn node))
+          [else
+           (loop (cdr content) kernel (cons (car content) mod))])))
+
 
 ;;
 ;; 1. Get kernel code
@@ -99,7 +182,7 @@
 ;;      => (( a0 (+ a-init 1)) (a1 (+ (phi k a0 a-init) 1)))
 ;;
 
-[define (for-updater node)
+[define (%for-updater node)
   (define-values (ssa0 _) (extract-ssa node))
   (define ssa1 (reduce-st-chain ssa0))
   (define ssa2 (reverse (delete-unnecessary-phi ssa1)))
@@ -195,29 +278,26 @@
 
 (define (ssa-code->xcodeml a)
   (define (rec n) (ssa-code->xcodeml n))
-  (define (cast n) `(castExpr (@ (type "int")) ,n))
+  (define (index n) `(arrayIndex ,n))
 
   (match a
     [(? number? _)
      (define s (number->string a))
-     (if (exact-integer? a) `(intConstant ,s) `(floatConstant ,s)) ]
+     (if (exact-integer? a) `(FintConstant ,s) `(FrealConstant ,s)) ]
 
-    [(? string? _)
-     (if (regexp-match "[fF]$" a)
-         `(floatConstant ,a)
-         `(Var ,(cut-original-var a)))]
+    [(? string? _) `(Var ,(cut-original-var a))]
 
     [(list (or 'st 'st2 'st3 'st4 'st5 'st6) name _ args ... expr)
-     `(assignExpr
-       (arrayRef (@ (type "none")) ; type is required but not actually used
-        (arrayAddr ,name)
-        ,@(map (compose cast rec) args))
+     `(FassignStatement
+       (FarrayRef (@ (type "none")) ; type is required but not actually used
+        (varRef (Var ,name))
+        ,@(map (compose index rec) args))
        ,(rec expr))]
 
     [(list (or 'ld 'ld2 'ld3 'ld4 'ld5 'ld6) name _ args ...)
-     `(arrayRef (@ (type "none"))
-       (arrayAddr ,name)
-       ,@(map (compose cast rec) args))]
+     `(FarrayRef (@ (type "none"))
+       (varRef (Var ,name))
+       ,@(map (compose index rec) args))]
 
     [(list 'fma a b c) `(plusExpr ,(rec a) (mulExpr ,(rec b) ,(rec c)))]
 
@@ -234,6 +314,9 @@
 	   [(equal? name "__moe")
 	    `(moeConstant (@ (type ,(~ args 0))) ,(~ args 1))]
 
+	   [(equal? name "__power")
+	    `(FpowerExpr (@ (type ,(~ args 0))) ,(rec (~ args 1)) ,(rec (~ args 2)))]
+
 	   [(equal? name "__memberref")
 	    `(memberRef (@ (member ,(~ args 1)) (type ,(~ args 2)) )
 			,(sxml:set-attr (rec (~ args 0)) `(type ,(~ args 3)) ))]
@@ -243,7 +326,8 @@
 
 	   [else
 	    `(functionCall
-	      (function (funcAddr ,name))
+          (@ (type "R1") (is_intrinsic "true"))
+	      (name ,name)
 	      (arguments ,@(map rec args)))])]
 
     [(list (and (or
@@ -328,14 +412,10 @@
              (cons ((if-car-sxpath '(*text*)) v)
                    ((if-car-sxpath '(@ type *text*)) v)))
            ((sxpath "//Var") node))
-      (map (lambda (p)
-             (cons ((if-car-sxpath '(plusExpr (Var 1) *text*)) p)
-                   ((if-car-sxpath '(@ type *text*)) p)))
-           ((sxpath "//pointerRef") node))
       (map (lambda (a)
-             (cons ((if-car-sxpath '(arrayAddr *text*)) a)
+             (cons ((if-car-sxpath '(varRef Var *text*)) a)
                    ((if-car-sxpath '(@ type *text*)) a)))
-           ((sxpath "//arrayRef") node)))))
+           ((sxpath "//FarrayRef") node)))))
 
   (define var-to-type1
     (append-map
@@ -348,7 +428,7 @@
                             ((conjoin string? tmpvar? remove-varhash) (~ e 2))))
                      env))
        (map (curryr cons type) ref-tmpvars))
-     ((sxpath "//assignExpr") node)))
+     ((sxpath "//FassignStatement") node)))
 
   ;; todo:
   ;;  consider casting by storing
@@ -373,7 +453,7 @@
 
             [else ;; dependency solved
              (loop
-              (assoc-adjoin v2t ca (infer-type (assoc-ref var-to-expr ca) v2t))
+              (assoc-adjoin v2t ca (type-reduct (infer-type (assoc-ref var-to-expr ca) v2t)))
               (cdr pending))])))
 
   (extend-compound node env
@@ -386,19 +466,15 @@
   (define (it x) (infer-type x v2t))
 
   (define (select-type types)
-    (define order '("double" "float" "long" "int"))
+    (define order '("Fcomplex" "Freal" "Fint"))
     (or
-     ;; pointer, struct
-     (any (conjoin (negate (curryr member order))
-		   (negate (curry string-prefix? "B")) ; avoid const scalar
-		   values) types)
-     ;; scalar
+     (find (conjoin values (curryr member order)) (sort types string>?))
      (find (curryr member types) order)
-     "double"))
+     "Freal"))
 
   (match e
     [(? number? _)
-     (if (exact-integer? e) "int" "float")]
+     (if (exact-integer? e) "Fint" "Freal")]
 
     [(? string? _)
      (assoc-ref v2t (cut-original-var e))]
@@ -407,6 +483,8 @@
 
     [(list 'functionCall name args ...)
      (cond [(equal? name "__cast") (~ args 0)]
+
+       [(equal? name "__power") (~ args 0)]
 
 	   [(equal? name "__moe") "int"]
 
@@ -499,8 +577,10 @@
                          (findf (negate (curry apply equal?)) (map list ia ib)))
                        (define da (~ diff 0))
                        (define db (~ diff 1))
-                       (if (and (number? da) (number? db)) (< da db)
-                           (string<? da db)))
+		       (cond [(and (number? da) (number? db)) (< da db)]
+			     [(and (number? da) (not (number? db))) #t]
+			     [(and (number? db) (not (number? da))) #t]
+			     [else (string<? da db)]))
                      ))))
 
             (loop (append ret sorted-loads rest) there)))))
@@ -518,18 +598,14 @@
        (lambda (v)
          (define orig (cut-original-var v))
          (define expr (ssa-code->xcodeml (hash-ref var-to-expr v)))
-         `(exprStatement
-           ,(if (member (car expr)
-                       '(asgPlusExpr asgMinusExpr asgMulExpr asgDivExpr))
-               expr
-               `(assignExpr (Var ,orig) ,expr))))
+         `(FassignStatement (Var ,orig) ,expr))
        update))
 
-    `(compoundStatement
+    `(blockStatement
       (symbols
        ,@(map
           (lambda (v)
-            `(id (@ (type ,(hash-ref var-to-type v))) (name ,v)))
+            `(id (@ (type ,(hash-ref var-to-type v)) (sclass "flocal") ) (name ,v)))
           decl))
       (declarations
        ,@(map
@@ -571,7 +647,7 @@
          (hash-mark! ht v)))
 
   (match (and (pair? node) (sxml:name node))
-    ['compoundStatement
+    ['body
      (define h (eq-hash-code node))
      (define ext-vars-ht (list->marking-hash (hash-ref comp-to-varlist h '())))
 
@@ -586,7 +662,7 @@
 
      (for-each (curry hash-mark! ext-vars-ht) here)
 
-     (define new-body (build-body ((sxpath "body/*") node) ext-vars-ht))
+     (define new-body (build-body (sxml:content node) ext-vars-ht))
 
      (define used '())
 
@@ -604,18 +680,19 @@
      (fold
       (lambda (vars s d b)
         (define r
-          `(compoundStatement
+          `(blockStatement
             (symbols ,s) (declarations ,d)
             (body ,b)))
 
         (if (null? vars) r (build-compound (list r) vars)))
 
-      `(compoundStatement (symbols) (declarations) (body ,@new-body))
+      `(body ,@new-body)
+
       (reverse vardecl-to-vars)
       (reverse ((sxpath "symbols/*") node))
       (reverse (map rec ((sxpath "declarations/*") node))))]
 
-    [(or 'assignExpr 'varDecl
+    [(or 'FassignStatement 'varDecl
          'postIncrExpr 'postDecrExpr 'preIncrExpr 'preDecrExpr
          'asgPlusExpr 'asgMinusExpr 'asgMulExpr 'asgDivExpr
          'asgModExpr 'asgLshiftExpr 'asgRshiftExpr 'asgBitAndExpr
@@ -629,15 +706,15 @@
      (if (not e) r
          (let ()
            (define out (ssa-code->xcodeml (~ e 2)))
-           (cond [(eq? (car out) 'assignExpr) out] ; in the case of stN
+           (cond [(eq? (car out) 'FassignStatement) out] ; in the case of stN
 
                  [(eq? (sxml:name node) 'varDecl)
                   `(varDecl (name ,(~ e 0)) (value ,out))]
 
                  [else
                   (if (and (eq? (car out) 'Var) (equal? (cadr out) (~ e 0)))
-                      '(intConstant "0") ; for removed stN
-                      `(assignExpr (Var ,(~ e 0)) ,out))]
+                      '(FintConstant "0") ; for removed stN
+                      `(FassignStatement (Var ,(~ e 0)) ,out))]
                  )))]
 
     [#f node]
@@ -650,7 +727,7 @@
     (decl-mapping n include-all nest))
 
   (match (and (pair? node) (sxml:name node))
-    [(or 'assignExpr 'varDecl
+    [(or 'FassignStatement 'varDecl
          'postIncrExpr 'postDecrExpr 'preIncrExpr 'preDecrExpr
          'asgPlusExpr 'asgMinusExpr 'asgMulExpr 'asgDivExpr
          'asgModExpr 'asgLshiftExpr 'asgRshiftExpr 'asgBitAndExpr
@@ -665,7 +742,9 @@
      (define r (append-map rec node))
      (define h (eq-hash-code node))
 
-     (if (not (or include-all (eq? (sxml:name node) 'compoundStatement))) r
+     (if (not (or include-all
+                  (eq? (sxml:name node) 'body)
+                  )) r
          (let ()
            (define-values (comp asg)
              (partition 
@@ -732,17 +811,17 @@
 
      (values new-env #f)]
 
-    ['compoundStatement
+    ['blockStatement
      (mrec
       (append
        ((sxpath "declarations/varDecl") node)
        ((sxpath "body/*") node)))]
 
-    ['forStatement
+    ['FdoStatement
      (define body ((sxpath "body/*") node))
      (define-values (body-env0 _) (mrec body))
      (define iterators
-       ((sxpath `(init assignExpr (* 1) ,(sxpath:name 'Var) *text*)) node))
+       ((sxpath '(Var *text*)) node))
      (define diff (lset-difference equal? body-env0 env))
      (define diff-vars (delete-duplicates (append iterators (map car diff))))
 
@@ -777,23 +856,19 @@
 
      (values (append phi-env body-env) #f)]
 
-    [(or 'doStatement 'whileStatement)
-     ;; todo
+    ['FdoWhileStatement
      (mrec ((sxpath "body/*") node))]
 
-    ['switchStatement
-     ;; todo
-     (mrec ((sxpath "body/*") node))]
-
-    ['ifStatement
+    ['FifStatement
      (define condition ((if-car-sxpath "condition/*") node))
-     (define then ((if-car-sxpath "then/*") node))
-     (define else ((if-car-sxpath "else/*") node))
+     (define then ((sxpath "then/body/*") node))
+     (define else ((sxpath "else/body/*") node))
 
-     (define-values (cond-env cond-expr) (rec condition))
-     (define-values (then-env0 _) (extract-ssa then cond-env))
+     (define-values (cond-env0 cond-expr) (rec condition))
+     (define cond-env env)
+     (define-values (then-env0 _) (mrec then cond-env))
      (define-values (else-env0 __)
-       (if else (extract-ssa else cond-env) (values cond-env #f)))
+       (if (pair? else) (mrec else cond-env) (values cond-env #f)))
 
      ;; Bound computation within conditional scopes
      (define then-updated (map car (lset-difference equal? then-env0 cond-env)))
@@ -806,9 +881,9 @@
 			     (list x (sat-temporary-hash)
 				   `(phi ,x 1 ,(~ (assoc-ref cond-env x `(0 ,x))
 						  1) ,x))) else-updated))
-     (define-values (then-env ___) (extract-ssa then (append then-phi cond-env)))
+     (define-values (then-env ___) (mrec then (append then-phi cond-env)))
      (define-values (else-env ____)
-       (if else (extract-ssa else (append else-phi cond-env)) (values cond-env #f)))
+       (if (pair? else) (mrec else (append else-phi cond-env)) (values cond-env #f)))
 
      (define then-vars (map car then-env))
      (define else-vars (map car else-env))
@@ -838,95 +913,20 @@
     ['exprStatement
      (rec (car (sxml:content node)))]
 
-    ['castExpr
-     (define-values (new-env new-rv) (rec (car (sxml:content node))))
-     (values new-env
-      `(functionCall "__cast" ,(sxml:attr node 'type) ,new-rv))]
-
-    ['moeConstant
-     (values env
-      `(functionCall "__moe" ,(sxml:attr node 'type) ,(sxml:text node)))]
-
-    ['memberRef
-     (define rv (car (sxml:content node)))
-     (define-values (new-env new-rv) (rec rv))
-     (values new-env
-      `(functionCall "__memberref" ,new-rv
-		     ,(sxml:attr node 'member)
-		     ,(sxml:attr node 'type)
-		     ,(sxml:attr rv 'type)))]
-
-    [(or 'postIncrExpr 'postDecrExpr 'preIncrExpr 'preDecrExpr)
-     (define var (car (sxml:content node)))
-     (define name (lv-name var))
-     (define h (eq-hash-code node))
-
-     (define op
-       (match (sxml:name node)
-         [(or 'preIncrExpr 'postIncrExpr) 'plusExpr]
-         [(or 'preDecrExpr 'postDecrExpr) 'minusExpr]
-         [else #f]))
-
-     (define pre
-       (match (sxml:name node)
-         [(or 'preIncrExpr 'preDecrExpr) #t] [else #t]))
-
-     (define-values (_ orig-expr) (rec var))
-     (define-values (incl-env incl-expr)
-       (rec `(assignExpr ,var (,op ,var (intConstant "1")))))
-
-     (define new-expr (~ (assoc-ref incl-env name) 1))
-
-     ;; Set a proper hash
-     (values (assoc-adjoin incl-env name (list h new-expr))
-             (if pre incl-expr orig-expr))]
-
-    [(or 'asgPlusExpr 'asgMinusExpr 'asgMulExpr 'asgDivExpr
-         'asgModExpr 'asgLshiftExpr 'asgRshiftExpr 'asgBitAndExpr
-         'asgBitOrExpr 'asgBitXorExpr)
-     (match-define (list var val) (sxml:content node))
-     (define name (lv-name var))
-     (define h (eq-hash-code node))
-
-     (define op
-       (match (sxml:name node)
-         ['asgPlusExpr 'plusExpr]
-         ['asgMinusExpr 'minusExpr]
-         ['asgMulExpr 'mulExpr]
-         ['asgDivExpr 'divExpr]
-         ['asgModExpr 'modExpr]
-         ['asgLshiftExpr 'LshiftExpr]
-         ['asgRshiftExpr 'RshiftExpr]
-         ['asgBitAndExpr 'bitAndExpr]
-         ['asgBitOrExpr 'bitOrExpr]
-         ['asgBitXorExpr 'bitXorExpr]))
-
-     (define-values (asg-env ret-expr)
-       (rec `(assignExpr ,var (,op ,var ,val))))
-
-     (define new-expr (~ (assoc-ref asg-env name) 1))
-
-     ;; Set a proper hash
-     (values (assoc-adjoin asg-env name (list h new-expr)) ret-expr)]
-
-    ['assignExpr
+    ['FassignStatement
      (match-define (list lv rv) (sxml:content node))
      (define-values (renv new-rv) (rec rv))
 
      (define name (lv-name lv))
      (define h (eq-hash-code node))
 
-     (unless (member (sxml:name lv) '(Var arrayRef pointerRef))
+     (unless (member (sxml:name lv) '(Var FarrayRef))
        (error (~a lv)))
 
      (define-values (new-env new-addrs)
        (match (sxml:name lv)
-         ['arrayRef
-          (define addrs (cdr (sxml:content lv)))
-          (mrec addrs renv)]
-
-         ['pointerRef
-          (define addrs (list (pointer-addr lv)))
+         ['FarrayRef
+          (define addrs ((sxpath "arrayIndex/*") lv))
           (mrec addrs renv)]
 
          [else (values renv #f)]))
@@ -947,8 +947,12 @@
 
      ;; todo support reference arguments
      (values new-env
-             `(functionCall ,((if-car-sxpath "function/funcAddr/text()") node)
+             `(functionCall ,((if-car-sxpath "name/text()") node)
                             ,@expr))]
+
+    ['FpowerExpr
+     (define-values (new-env expr) (mrec (sxml:content node)))
+     (values new-env `(functionCall "__power" ,(sxml:attr node 'type) ,@expr))]
 
     [(or 'plusExpr 'minusExpr 'mulExpr 'divExpr 'condExpr 'modExpr
          'LshiftExpr 'RshiftExpr 'bitAndExpr 'bitOrExpr 'bitXorExpr
@@ -958,8 +962,8 @@
      (define-values (new-env expr) (mrec (sxml:content node)))
      (values new-env (cons (sxml:name node) expr))]
 
-    ['arrayRef
-     (define addrs (cdr (sxml:content node)))
+    ['FarrayRef
+     (define addrs ((sxpath "arrayIndex/*") node))
      (define-values (new-env new-addrs) (mrec addrs))
 
      (define len (length addrs))
@@ -969,36 +973,15 @@
      (values env
              (opt-dep-ld `(,ld ,name ,(rename name new-env) ,@new-addrs) new-env))]
 
-    ['pointerRef
-     (define addr (pointer-addr node))
-     (define-values (new-env new-addr) (rec addr))
-
-     (define name (lv-name node))
-     (values new-env
-             (opt-dep-ld `(ld ,name ,(rename name new-env) ,new-addr) new-env))]
-
     ['Var
      (define name (rename (lv-name node) env))
      (values env name)]
 
-    ['varAddr
-     (define name (lv-name node))
-     (define h (sat-temporary-hash))
-     (values
-      (cons (list name h name) env)
-      `(functionCall "__varAddr" ,name ,(sxml:attr node 'type) ,h))]
-
-    [(or 'intConstant 'longlongConstant 'floatConstant)
-     (define text (sxml:text node))
-     (if (regexp-match "[fF]$" text)
-         (values env text)
-         (values
-          env
-          (string->number
-           (regexp-replace #rx"[a-zA-Z]$" text ""))))]
+    [(or 'FintConstant 'FlogicalConstant 'FrealConstant)
+     (values env (string->number (sxml:text node)))]
 
     [(or 'caseLabel 'defaultLabel 'breakStatement 'continueStatement
-         'stringConstant 'funcAddr 'arrayAddr)
+         'stringConstant 'funcAddr 'arrayAddr 'FpragmaStatement)
      (values env (sxml:snip node))]
 
     [else (error (~a node))]))
@@ -1042,32 +1025,9 @@
   (if (not ref) x
       (format "~a__~a" x (car ref))))
 
-(define (pointer-addr x)
-  (define content (car (sxml:content x)))
-  (match (sxml:name content)
-    ;; (pointerRef (plusExpr (Var ..) addr))
-    ['plusExpr
-     (cadr (sxml:content content))]
-
-    ['castExpr
-     (pointer-addr content)]
-
-    [else (error (~a "Unsupported addr: " x))]))
-
 (define (lv-name x)
   (define cc (lambda (a) (car (sxml:content a))))
   (match (sxml:name x)
     ['Var (cc x)]
-    ['varAddr (cc x)]
-    ['arrayRef (cc (cc x))]
-    ['pointerRef
-     (define content (cc x))
-     (match (sxml:name content)
-       ;; (pointerRef (plusExpr (Var ..) addr))
-       ['plusExpr (cc (cc content))]
-
-       ['castExpr
-	(lv-name (sxml:change-name content 'pointerRef))]
-
-       [else (error (~a "Unsupported addr: " x))])]
+    ['FarrayRef (cc (cc (cc x)))]
     ))

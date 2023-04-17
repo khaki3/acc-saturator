@@ -1,6 +1,6 @@
 ## acc-saturator
 
-Equality saturation for OpenACC/OpenMP in C.
+Equality saturation for OpenACC in Fortran.
 
 ## Requirements
 * Racket (>= 8.4)
@@ -18,5 +18,5 @@ Also,
 ## Usage
 Wrap as below:
 ```
-% accsat nvc ..
+% accsat nvfortran ..
 ```

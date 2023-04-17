@@ -1,1 +1,0 @@
-../spec-accel/EXTRACT.sh

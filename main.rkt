@@ -11,7 +11,7 @@
 (define DEBUG_MODE (getenv "ACCSAT_DEBUG"))
 
 (define (extract-source-files args)
-  (filter (curry regexp-match #rx"\\.c$") args))
+  (filter (curry regexp-match #rx"\\.[fF]90$") args))
 
 (define (extract-include-directories args)
   (filter (curry regexp-match #rx"^-I") args))
@@ -68,19 +68,15 @@
 
       (define src-xml (build-path subdir "__src.xml"))
       (define dst-xml (build-path subdir "__dst.xml"))
-      (define tmp-xml (build-path subdir "__tmp.xml"))
-      (define tmp-c (build-path subdir "__dst.c"))
-      (define out-c (build-path subdir filename))
+      (define out-f (build-path subdir filename))
 
       (when DEBUG_MODE
         (eprintf "[ACCSAT] ~a compiled in ~a\n" s subdir))
 
       ;; Run the preprocessor; Convert to XML
       (define e (process-output->string
-                 ;; -D__CUDACC__ disables float128
-                 `(,cc "-E -D__CUDACC__" ,@macros ,@accopt ,@incdir ,s
-                       "| C_Front -facc -fopenmp --no-builtin-va-arg"
-                       "| grep -av '<linemarker lineno=' > "
+                 `(,cc "-cpp -E" ,@macros ,@accopt ,@incdir ,s
+                       "| F_Front -facc > "
                        ,(path->string src-xml))))
 
       ;; Load as SXML
@@ -95,23 +91,15 @@
       (call-with-output-file dst-xml
         (curry srl:sxml->xml out-sxml))
 
-      ;; Convert back to C
+      ;; Convert back to F
       (process-output->string
-       `("java -Xss4m -cp"
-         ,(format
-           "~a/om-c-back.jar:~a/om-common.jar:~a/om-exc-tools.jar"
-           jar-dir jar-dir jar-dir)
-         "exc.util.omompx -decomp -xc"
-         ,(path->string dst-xml) "-o" ,(path->string tmp-xml)))
-
-      ;; Adjust output
-      (adjust-output out-c tmp-c)
+       `("F_Back" ,(path->string dst-xml) "-o" ,(path->string out-f)))
 
       (when DEBUG_MODE
         (eprintf "[ACCSAT] Saturated ~a saved as ~a.sat\n" s s)
-        (system (~a "cp " out-c " " s ".sat")))
+        (system (~a "cp " out-f " " s ".sat")))
 
-      (path->string out-c)))
+      (path->string out-f)))
 
   ;; Execute cc while replacing sources
   (process-output->string (replace-args args source new-source))
