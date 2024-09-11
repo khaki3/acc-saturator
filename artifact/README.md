@@ -1,6 +1,6 @@
 ## ACCSAT-Artifact
 
-This archive provides the artifact to manifest our paper "ACC Saturator: Automatic Kernel Optimization for Directive-Based GPU Code". We evaluated the generated code by our source-code optimizer ACC Saturator.
+This archive provides the artifact to manifest our paper "ACC Saturator: Automatic Kernel Optimization for Directive-Based GPU Code" (to be presented at WACCPD 2024). We evaluated the generated code by our source-code optimizer ACC Saturator.
 
 ### Preparation for SPEC ACCEL
 As the SPEC ACCEL benchmark suite is proprietary software, we suggest that reviewers copy their local SPEC v1.3 to the spec-accel directory. Specify SPEC_PATH to the directory of SPEC ACCEL, and run the following commands in this artifact directory:
@@ -17,8 +17,8 @@ We provide Dockerfile to build a container by the NVIDIA Container Toolkit. You 
 
 ```sh
 % cp -r ../rewriter .
-% docker build -t sc23_pap143s2 .
-% docker run -v ~/:/work -it --rm --gpus all sc23_pap143s2
+% docker build -t accsat_artifact .
+% docker run -v ~/:/work -it --rm --gpus all accsat_artifact
 
 ====================
 == NVIDIA HPC SDK ==
